@@ -669,24 +669,6 @@ export class CommandsManager {
     });
 
     this.plugin.addCommand({
-      id: "ai-login-pkmer",
-      name: this.formatAICommandName("Account", "Login to PKMer AI"),
-      icon: "lucide-log-in",
-      callback: async () => {
-        await this.plugin.aiManager.loginWithPKMer();
-      },
-    });
-
-    this.plugin.addCommand({
-      id: "ai-logout-pkmer",
-      name: this.formatAICommandName("Account", "Logout from PKMer"),
-      icon: "lucide-log-out",
-      callback: async () => {
-        await this.plugin.aiManager.logoutFromPKMer();
-      },
-    });
-
-    this.plugin.addCommand({
       id: "ai-inline-completion",
       name: this.formatAICommandName("Complete", "Quick Trigger"),
       icon: "lucide-sparkles",

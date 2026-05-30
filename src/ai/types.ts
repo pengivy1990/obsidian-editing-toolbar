@@ -70,44 +70,6 @@ export interface RewriteConfig {
   createGeneratedArtifact?: (request: RewriteArtifactRequest) => Promise<RewriteArtifactResult>;
 }
 
-export interface PKMerUserInfo {
-  sub: string;
-  name?: string;
-  email?: string;
-  avatar?: string;
-  ai_quota?: { quota: number; remainingQuota?: number; [key: string]: any };
-  device_count?: number;
-  thino?: boolean | string | number;
-  thinoWebExpir?: string | number;
-  supporter?: boolean | string | number;
-}
-
-export interface PKMerAuthSettings {
-  tokenExpiresAt: number;
-  userInfo: PKMerUserInfo | null;
-}
-
-export interface CustomModelSettings {
-  apiFormat: CustomModelApiFormat;
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  temperature: number;
-}
-
-export type CustomModelApiFormat = "openai-compatible" | "ollama";
-
-export type PKMerModelRoutingMode = "smart" | "manual";
-export type PKMerModelScene = "completion" | "rewrite" | "reasoning" | "artifact";
-
-export interface PKMerModelRoutingSettings {
-  mode: PKMerModelRoutingMode;
-  completion: string;
-  rewrite: string;
-  reasoning: string;
-  artifact: string;
-}
-
 export interface CustomPromptTemplate {
   id: string;
   name: string;
@@ -115,11 +77,20 @@ export interface CustomPromptTemplate {
   icon?: string;
 }
 
+export type CustomModelApiFormat = "openai-compatible" | "ollama";
+
+export interface CustomModelSettings {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  temperature: number;
+  apiFormat: CustomModelApiFormat;
+}
+
 export interface AIPluginSettings {
   enabled: boolean;
   consentAccepted: boolean;
   onboardingShown: boolean;
-  providerMode: "pkmer-first" | "custom-only";
   enableInlineCompletion: boolean;
   inlineCompletionHintLearned: boolean;
   completionTrigger: "manual" | "auto";
@@ -127,43 +98,11 @@ export interface AIPluginSettings {
   enableRewrite: boolean;
   showRewriteToolbarOnSelection: boolean;
   rewriteMinSelectionLength: number;
-  pkmerApiBaseUrl: string;
-  pkmerModel: string;
-  pkmerModelRouting: PKMerModelRoutingSettings;
-  pkmer: PKMerAuthSettings;
   enableCustomModel: boolean;
   customModel: CustomModelSettings;
   customPromptHistory: string[];
   customPromptTemplates: CustomPromptTemplate[];
 }
-
-export const PKMER_MODEL_OPTIONS = [
-  { value: "04-fast", label: "04-fast" },
-  { value: "03-agent", label: "03-agent" },
-] as const;
-
-export const DEFAULT_PKMER_MODEL_ROUTING: PKMerModelRoutingSettings = {
-  mode: "smart",
-  completion: "04-fast",
-  rewrite: "04-fast",
-  reasoning: "03-agent",
-  artifact: "03-agent",
-};
-
-export function resolvePKMerModelForScene(settings: AIPluginSettings, scene: PKMerModelScene): string {
-  const routing = settings.pkmerModelRouting ?? DEFAULT_PKMER_MODEL_ROUTING;
-  if (routing.mode === "smart") {
-    return DEFAULT_PKMER_MODEL_ROUTING[scene];
-  }
-
-  const configuredModel = routing[scene]?.trim();
-  return configuredModel || DEFAULT_PKMER_MODEL_ROUTING[scene];
-}
-
-export const DEFAULT_PKMER_AUTH_SETTINGS: PKMerAuthSettings = {
-  tokenExpiresAt: 0,
-  userInfo: null,
-};
 
 const DEFAULT_CUSTOM_PROMPT_TEMPLATES_ZH: CustomPromptTemplate[] = [
   {
@@ -267,25 +206,20 @@ export const DEFAULT_AI_SETTINGS: AIPluginSettings = {
   enabled: false,
   consentAccepted: false,
   onboardingShown: false,
-  providerMode: "pkmer-first",
-  enableInlineCompletion: true,
+  enableInlineCompletion: false,
   inlineCompletionHintLearned: false,
   completionTrigger: "manual",
   completionDelay: 500,
   enableRewrite: true,
   showRewriteToolbarOnSelection: false,
   rewriteMinSelectionLength: 1,
-  pkmerApiBaseUrl: "https://newapi.pkmer.cn",
-  pkmerModel: "04-fast",
-  pkmerModelRouting: DEFAULT_PKMER_MODEL_ROUTING,
-  pkmer: DEFAULT_PKMER_AUTH_SETTINGS,
   enableCustomModel: false,
   customModel: {
-    apiFormat: "openai-compatible",
     baseUrl: "",
-    apiKey: "",
     model: "",
-    temperature: 0.2,
+    apiKey: "",
+    temperature: 0.7,
+    apiFormat: "openai-compatible",
   },
   customPromptHistory: [],
   customPromptTemplates: getDefaultCustomPromptTemplates("zh-cn"),
@@ -309,21 +243,3 @@ export const DEFAULT_REWRITE_ACTIONS: RewriteActionMeta[] = [
   { instruction: "summarize", label: "Summarize", group: "Generate" },
   { instruction: "continue", label: "Continue writing", group: "Generate" },
 ];
-
-export const PKMER_SECRET_KEYS = {
-  accessToken: "editing-toolbar-pkmer-access-token",
-  refreshToken: "editing-toolbar-pkmer-refresh-token",
-  aiToken: "editing-toolbar-pkmer-ai-token",
-  customModelApiKey: "editing-toolbar-custom-model-api-key",
-} as const;
-
-export const PKMER_OAUTH_CONFIG = {
-  authorizationUrl: "https://api.pkmer.cn/api/v1/oauth/authorize",
-  tokenUrl: "https://api.pkmer.cn/api/v1/oauth/token",
-  userinfoUrl: "https://api.pkmer.cn/api/v1/oauth/userinfo",
-  clientId: "pkmer_dd2a562c8653ca0112a050150d974ccd",
-  scopes: "openid profile email ai:token",
-  desktopRedirectUri: "http://localhost:10891/editing-toolbar/callback",
-  mobileRedirectUri: "obsidian://editing-toolbar-pkmer-auth",
-  callbackPort: 10891,
-} as const;

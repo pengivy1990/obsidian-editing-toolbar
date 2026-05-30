@@ -915,11 +915,6 @@ this.app.workspace.onLayoutReady(async () => {
   async loadSettings() {
     const loadedData = await this.loadData();
     const loadedAI = loadedData?.ai;
-    const legacyCustomModelConfigured = !!(
-      loadedAI?.customModel?.baseUrl?.trim?.() ||
-      loadedAI?.customModel?.model?.trim?.() ||
-      loadedAI?.customModel?.apiKey?.trim?.()
-    );
     const resolvedCustomPromptTemplates = Array.isArray(loadedAI?.customPromptTemplates)
       ? loadedAI.customPromptTemplates.map((template: CustomPromptTemplate) => ({ ...template }))
       : getDefaultCustomPromptTemplates();
@@ -931,19 +926,6 @@ this.app.workspace.onLayoutReady(async () => {
     this.settings.ai = {
       ...DEFAULT_SETTINGS.ai,
       ...(loadedAI || {}),
-      enableCustomModel: loadedAI?.enableCustomModel ?? legacyCustomModelConfigured,
-      pkmerModelRouting: {
-        ...DEFAULT_SETTINGS.ai.pkmerModelRouting,
-        ...(loadedAI?.pkmerModelRouting || {}),
-      },
-      pkmer: {
-        ...DEFAULT_SETTINGS.ai.pkmer,
-        ...(loadedAI?.pkmer || {}),
-      },
-      customModel: {
-        ...DEFAULT_SETTINGS.ai.customModel,
-        ...(loadedAI?.customModel || {}),
-      },
       customPromptHistory: resolvedCustomPromptHistory,
       customPromptTemplates: resolvedCustomPromptTemplates,
     };
@@ -953,16 +935,6 @@ this.app.workspace.onLayoutReady(async () => {
     }
     if (loadedAI !== undefined && loadedAI?.onboardingShown === undefined) {
       this.settings.ai.onboardingShown = true;
-    }
-    if (loadedAI?.pkmerModelRouting === undefined && loadedAI?.pkmerModel?.trim?.()) {
-      const legacyModel = loadedAI.pkmerModel.trim();
-      this.settings.ai.pkmerModelRouting = {
-        mode: "manual",
-        completion: legacyModel,
-        rewrite: legacyModel,
-        reasoning: legacyModel,
-        artifact: legacyModel,
-      };
     }
 
     this.syncAIToolbarCommandVisibility();

@@ -2,13 +2,9 @@ import { requestUrl, type RequestUrlResponse } from "obsidian";
 import type EditingToolbarPlugin from "src/plugin/main";
 import { t } from "src/translations/helper";
 import { AIUserNoticeError, getAIErrorMessage, getRequestErrorStatus } from "./errorHandling";
-import { resolvePKMerModelForScene } from "./types";
-import type { CompletionParams, IAIService, PKMerModelScene, RewriteArtifactKind, RewriteInstruction, RewriteParams } from "./types";
-import type { CustomModelApiFormat } from "./types";
-import { PKMerAuthService } from "./PKMerAuthService";
+import type { CompletionParams, IAIService, CustomModelApiFormat, RewriteArtifactKind, RewriteInstruction, RewriteParams } from "./types";
 
 interface ResolvedProvider {
-  kind: "pkmer" | "custom";
   apiFormat: CustomModelApiFormat;
   baseUrl: string;
   apiKey: string;
@@ -23,7 +19,6 @@ interface CustomProviderValidationResult {
 
 interface ChatCompletionOptions {
   maxTokens?: number;
-  pkmerScene?: PKMerModelScene;
 }
 
 interface ChatCompletionResult {
@@ -33,12 +28,10 @@ interface ChatCompletionResult {
 
 export class ToolbarAIService implements IAIService {
   private plugin: EditingToolbarPlugin;
-  private authService: PKMerAuthService;
   private customChatCompletionsUrlCache = new Map<string, string>();
 
-  constructor(plugin: EditingToolbarPlugin, authService: PKMerAuthService) {
+  constructor(plugin: EditingToolbarPlugin) {
     this.plugin = plugin;
-    this.authService = authService;
   }
 
   async *complete(params: CompletionParams, signal?: AbortSignal): AsyncIterable<string> {
@@ -55,6 +48,20 @@ export class ToolbarAIService implements IAIService {
     return !!this.getCustomProviderValidation().provider;
   }
 
+  get apiKey(): string {
+    return this.plugin.settings.ai.customModel.apiKey?.trim() ?? "";
+  }
+
+  saveApiKey(key: string): void {
+    this.plugin.settings.ai.customModel.apiKey = key;
+    void this.plugin.saveSettings();
+  }
+
+  clearApiKey(): void {
+    this.plugin.settings.ai.customModel.apiKey = "";
+    void this.plugin.saveSettings();
+  }
+
   async testCustomProviderConnection(): Promise<void> {
     const validation = this.getCustomProviderValidation();
     if (!validation.provider) {
@@ -63,19 +70,11 @@ export class ToolbarAIService implements IAIService {
 
     await this.requestChatCompletionResult(
       [
-        {
-          role: "system",
-          content: "Reply with OK only.",
-        },
-        {
-          role: "user",
-          content: "ping",
-        },
+        { role: "system", content: "Reply with OK only." },
+        { role: "user", content: "ping" },
       ],
       undefined,
-      {
-        maxTokens: 1,
-      },
+      { maxTokens: 1 },
       validation.provider,
     );
   }
@@ -83,7 +82,7 @@ export class ToolbarAIService implements IAIService {
   async listCustomOllamaModels(): Promise<string[]> {
     const validation = this.getCustomProviderValidation();
     const provider = validation.provider;
-    if (!provider || provider.kind !== "custom" || provider.apiFormat !== "ollama") {
+    if (!provider || provider.apiFormat !== "ollama") {
       throw new Error("Ollama custom model settings are not enabled.");
     }
 
@@ -111,28 +110,25 @@ export class ToolbarAIService implements IAIService {
           continue;
         }
 
-        await this.rethrowUserFacingRequestError(error, requestUrlValue);
+        throw error;
       }
     }
 
-    await this.rethrowUserFacingRequestError(lastError, candidateUrls[0] ?? provider.baseUrl);
+    throw lastError;
   }
 
   private async requestCompletion(params: CompletionParams, signal?: AbortSignal): Promise<string> {
     const localPrefix = params.prefix.slice(-2000);
     const localSuffix = params.suffix.slice(0, 800);
     const contextBlock = params.context ? `\n\nLocal cursor metadata:\n${params.context}` : "";
-    const provider = await this.resolveProvider("completion");
+    const provider = this.resolveProvider();
     let accumulated = "";
 
     for (let round = 0; round < 3; round++) {
       const response = await this.requestChatCompletionResult(
         this.buildCompletionMessages(localPrefix, localSuffix, contextBlock, accumulated),
         signal,
-        {
-          maxTokens: this.getCompletionTokenBudget(localPrefix, localSuffix, accumulated, round),
-          pkmerScene: "completion",
-        },
+        { maxTokens: this.getCompletionTokenBudget(localPrefix, localSuffix, accumulated, round) },
         provider,
       );
 
@@ -159,9 +155,6 @@ export class ToolbarAIService implements IAIService {
     return this.requestChatCompletion(
       this.buildRewriteMessages(params),
       signal,
-      {
-        pkmerScene: this.resolveRewriteScene(params),
-      },
     );
   }
 
@@ -184,7 +177,7 @@ export class ToolbarAIService implements IAIService {
       throw new DOMException("Aborted", "AbortError");
     }
 
-    const resolvedProvider = provider ?? (await this.resolveProvider(options.pkmerScene));
+    const resolvedProvider = provider ?? this.resolveProvider();
     const { response } = await this.requestChatCompletionsWithFallback(resolvedProvider, messages, signal, options);
 
     if (signal?.aborted) {
@@ -212,24 +205,20 @@ export class ToolbarAIService implements IAIService {
       const requestUrlValue = candidateUrls[index];
       try {
         const response = await this.executeChatCompletionsRequest(requestUrlValue, provider, messages, signal, options);
-        if (provider.kind === "custom") {
-          this.rememberCustomChatCompletionsUrl(provider.baseUrl, provider.apiFormat, requestUrlValue);
-        }
+        this.rememberCustomChatCompletionsUrl(provider.baseUrl, provider.apiFormat, requestUrlValue);
         return { response, requestUrlValue };
       } catch (error) {
         lastError = error;
-        const canRetryWithNextUrl = provider.kind === "custom"
-          && index < candidateUrls.length - 1
-          && this.isRetryableEndpointError(error);
+        const canRetryWithNextUrl = index < candidateUrls.length - 1 && this.isRetryableEndpointError(error);
         if (canRetryWithNextUrl) {
           continue;
         }
 
-        await this.rethrowUserFacingRequestError(error, requestUrlValue);
+        throw error;
       }
     }
 
-    await this.rethrowUserFacingRequestError(lastError, candidateUrls[0] ?? provider.baseUrl);
+    throw lastError;
   }
 
   private async executeChatCompletionsRequest(
@@ -259,7 +248,7 @@ export class ToolbarAIService implements IAIService {
     messages: Array<{ role: string; content: string }>,
     options: ChatCompletionOptions = {},
   ): Record<string, unknown> {
-    if (provider.kind === "custom" && provider.apiFormat === "ollama") {
+    if (provider.apiFormat === "ollama") {
       return this.buildOllamaRequestBody(requestUrlValue, provider, messages, options);
     }
 
@@ -314,35 +303,13 @@ export class ToolbarAIService implements IAIService {
     return prompt ? `${prompt}\n\nASSISTANT:\n` : "ASSISTANT:\n";
   }
 
-  private async resolveProvider(scene: PKMerModelScene = "rewrite"): Promise<ResolvedProvider> {
-    const pkmerProvider = await this.getPKMerProvider(scene);
-    if (pkmerProvider) {
-      return pkmerProvider;
-    }
-
+  private resolveProvider(): ResolvedProvider {
     const customProvider = this.getCustomProviderValidation().provider;
     if (customProvider) {
       return customProvider;
     }
 
-    throw new Error("No AI provider is configured. Please log in to PKMer or fill in custom model settings.");
-  }
-
-  private async getPKMerProvider(scene: PKMerModelScene): Promise<ResolvedProvider | null> {
-    const settings = this.plugin.settings.ai;
-    const verified = await this.authService.verify();
-    if (!verified || !this.authService.aiToken) {
-      return null;
-    }
-
-    return {
-      kind: "pkmer",
-      apiFormat: "openai-compatible",
-      baseUrl: settings.pkmerApiBaseUrl,
-      apiKey: this.authService.aiToken,
-      model: resolvePKMerModelForScene(settings, scene),
-      temperature: settings.customModel.temperature,
-    };
+    throw new Error("No AI provider is configured. Please fill in the custom model settings.");
   }
 
   private getCustomProviderValidation(): CustomProviderValidationResult {
@@ -351,8 +318,7 @@ export class ToolbarAIService implements IAIService {
     }
 
     const custom = this.plugin.settings.ai.customModel;
-    const customApiKey = this.authService.customModelApiKey.trim();
-    const customApiFormat = custom.apiFormat ?? "openai-compatible";
+    const customApiKey = custom.apiKey?.trim() ?? "";
     const missing: string[] = [];
 
     if (!custom.baseUrl.trim()) {
@@ -361,7 +327,7 @@ export class ToolbarAIService implements IAIService {
     if (!custom.model.trim()) {
       missing.push("model");
     }
-    if (customApiFormat !== "ollama" && !customApiKey) {
+    if (custom.apiFormat !== "ollama" && !customApiKey) {
       missing.push("apiKey");
     }
 
@@ -371,8 +337,7 @@ export class ToolbarAIService implements IAIService {
 
     return {
       provider: {
-        kind: "custom",
-        apiFormat: customApiFormat,
+        apiFormat: custom.apiFormat,
         baseUrl: custom.baseUrl.trim(),
         apiKey: customApiKey,
         model: custom.model.trim(),
@@ -382,15 +347,7 @@ export class ToolbarAIService implements IAIService {
     };
   }
 
-  private buildChatCompletionsUrl(baseUrl: string): string {
-    return this.buildChatCompletionsCandidateUrls(baseUrl)[0] ?? baseUrl.trim().replace(/\/+$/, "");
-  }
-
   private getChatCompletionsCandidateUrls(provider: ResolvedProvider): string[] {
-    if (provider.kind !== "custom") {
-      return [this.buildChatCompletionsUrl(provider.baseUrl)];
-    }
-
     const cacheKey = this.getCustomProviderCacheKey(provider.baseUrl, provider.apiFormat);
     const cachedUrl = this.customChatCompletionsUrlCache.get(cacheKey);
     const urls = provider.apiFormat === "ollama"
@@ -548,38 +505,6 @@ export class ToolbarAIService implements IAIService {
     return Array.from(new Set(names)).sort((left, right) => left.localeCompare(right));
   }
 
-  private async rethrowUserFacingRequestError(error: unknown, requestUrlValue: string): Promise<never> {
-    if (await this.isPKMerQuotaError(error, requestUrlValue)) {
-      throw new AIUserNoticeError(
-        t("PKMer AI request failed because your quota is insufficient. Please get more quota in PKMer and try again."),
-      );
-    }
-
-    throw error;
-  }
-
-  private async isPKMerQuotaError(error: unknown, requestUrlValue: string): Promise<boolean> {
-    if (!/pkmer\.cn/i.test(requestUrlValue)) {
-      return false;
-    }
-
-    if (getRequestErrorStatus(error) !== 403) {
-      return false;
-    }
-
-    const quota = await this.authService.refreshQuota().catch(() => null);
-    const rawQuota = quota?.quota ?? quota?.remainingQuota;
-    if (typeof rawQuota === "number") {
-      const normalizedQuota = Number((rawQuota / 500000).toFixed(2));
-      if (normalizedQuota <= 1) {
-        return true;
-      }
-    }
-
-    const message = getAIErrorMessage(error).toLowerCase();
-    return /quota|credit|balance|insufficient|额度|点数|余量不足|余额不足/.test(message);
-  }
-
   private buildCompletionMessages(
     localPrefix: string,
     localSuffix: string,
@@ -602,22 +527,6 @@ export class ToolbarAIService implements IAIService {
         content: `Continue the text at <CURSOR>. Use the local cursor context below, not the whole document.${continuationNote}\n\nText before cursor:\n${effectivePrefix}\n\n<CURSOR>\n\nText after cursor:\n${localSuffix}${contextBlock}`,
       },
     ];
-  }
-
-  private resolveRewriteScene(params: RewriteParams): PKMerModelScene {
-    if (params.artifactKind) {
-      return "artifact";
-    }
-
-    if (
-      params.instruction === "explain" ||
-      params.instruction === "summarize" ||
-      params.instruction === "custom"
-    ) {
-      return "reasoning";
-    }
-
-    return "rewrite";
   }
 
   private buildRewriteMessages(params: RewriteParams): Array<{ role: string; content: string }> {
@@ -647,7 +556,7 @@ export class ToolbarAIService implements IAIService {
     }
 
     if (artifactKind === "base") {
-      return "You are an expert Obsidian Bases generator. Generate production-ready .base YAML files that obey Obsidian Bases conventions. Return only valid YAML, never explanations, never markdown fences, and never partial structures. The output must be directly saveable as a .base file and open cleanly in Obsidian. Prefer practical fields, formulas, and views over placeholder content.";
+      return "You are an expert Obsidian Bases generator. Generate production-ready .base YAML files that obey Obsidian Bases conventions. Return only valid YAML, never explanations, never markdown fences, never partial structures. The output must be directly saveable as a .base file and open cleanly in Obsidian. Prefer practical fields, formulas, and views over placeholder content.";
     }
 
     if (artifactKind === "frontmatter") {

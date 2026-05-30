@@ -19,10 +19,7 @@ import { ImportExportModal } from "src/modals/ImportExportModal";
 import { RegexCommandModal } from "src/modals/RegexCommandModal";
 import { ButtonComponent } from "obsidian";
 import { ConfirmModal } from "src/modals/ConfirmModal";
-import { PKMER_MODEL_OPTIONS, resolvePKMerModelForScene } from "src/ai/types";
-import type { CustomModelApiFormat } from "src/ai/types";
-import { getAIErrorMessage } from "src/ai/errorHandling";
-import { getPKMerAIEntryUrl, getPKMerAIQuotaUrl } from "src/ai/pkmerWeb";
+import { CustomModelApiFormat } from "src/ai/types";
 // 添加类型定义
 interface SubmenuCommand {
   id: string;
@@ -116,9 +113,6 @@ export class editingToolbarSettingTab extends PluginSettingTab {
   appendMethod: string;
   pickrs: Pickr[] = [];
   activeTab: string = 'general';
-  private cachedCustomOllamaModels: string[] = [];
-  private cachedCustomOllamaModelsBaseUrl = '';
-  private cachedCustomOllamaModelsError = '';
   // 添加一个属性来跟踪当前正在编辑的配置
   private currentEditingConfig: string;
 
@@ -136,28 +130,6 @@ export class editingToolbarSettingTab extends PluginSettingTab {
       editingToolbarPopover(app, this.plugin);
       this.display();
     });
-  }
-
-  private async refreshCustomOllamaModels(): Promise<void> {
-    const baseUrl = this.plugin.settings.ai.customModel.baseUrl.trim();
-
-    try {
-      const models = await this.plugin.aiManager.listCustomOllamaModels();
-      this.cachedCustomOllamaModels = models;
-      this.cachedCustomOllamaModelsBaseUrl = baseUrl;
-      this.cachedCustomOllamaModelsError = '';
-
-      if (models.length === 0) {
-        new Notice(t('No Ollama models found at this endpoint.'));
-      }
-    } catch (error) {
-      this.cachedCustomOllamaModels = [];
-      this.cachedCustomOllamaModelsBaseUrl = baseUrl;
-      this.cachedCustomOllamaModelsError = getAIErrorMessage(error);
-      new Notice(`${t('Failed to load Ollama models:')} ${this.cachedCustomOllamaModelsError}`);
-    }
-
-    this.display();
   }
 
   display(): void {
@@ -1724,32 +1696,12 @@ export class editingToolbarSettingTab extends PluginSettingTab {
   private displayAISettings(containerEl: HTMLElement): void {
     const grid = containerEl.createDiv('editing-toolbar-ai-grid');
     const aiEnabled = this.plugin.settings.ai.enabled;
-    const inlineCompletionEnabled = aiEnabled && this.plugin.settings.ai.enableInlineCompletion;
-    const autoCompletionEnabled = inlineCompletionEnabled && this.plugin.settings.ai.completionTrigger === 'auto';
-    const customModelEnabled = aiEnabled && this.plugin.settings.ai.enableCustomModel;
-    const pkmerModelRoutingMode = this.plugin.settings.ai.pkmerModelRouting.mode;
-    const getPkmerModelLabel = (model: string): string => {
-      switch (model) {
-        case '04-fast':
-          return t('Light model');
-        case '03-agent':
-          return t('Reasoning model');
-        default:
-          return model;
-      }
-    };
-    const addPkmerModelOptions = (dropdown: any) => {
-      PKMER_MODEL_OPTIONS.forEach((option) => {
-        dropdown.addOption(option.value, getPkmerModelLabel(option.value));
-      });
-      return dropdown;
-    };
+
     const createCard = (options: {
       title: string;
       desc: string;
       badge?: string;
       toggle?: { value: boolean; onChange: (value: boolean) => void };
-      headerDropdown?: { options: {value: string; label: string}[]; value: string; onChange: (value: string) => void };
       collapsible?: boolean;
       open?: boolean;
     }): HTMLElement => {
@@ -1780,18 +1732,6 @@ export class editingToolbarSettingTab extends PluginSettingTab {
           newVal ? toggleEl.addClass('is-enabled') : toggleEl.removeClass('is-enabled');
           toggle.onChange(newVal);
         });
-      } else if (options.headerDropdown) {
-        const { headerDropdown } = options;
-        const sel = header.createEl('select', { cls: 'editing-toolbar-ai-card-header-select dropdown' });
-        headerDropdown.options.forEach(opt => {
-          const o = sel.createEl('option', { text: opt.label });
-          o.value = opt.value;
-          if (opt.value === headerDropdown.value) o.selected = true;
-        });
-        sel.addEventListener('click', (e) => e.stopPropagation());
-        sel.addEventListener('change', (e) => {
-          headerDropdown.onChange((e.target as HTMLSelectElement).value);
-        });
       } else if (options.badge) {
         header.createDiv({ cls: 'editing-toolbar-ai-card-badge', text: options.badge });
       }
@@ -1801,7 +1741,7 @@ export class editingToolbarSettingTab extends PluginSettingTab {
 
     const basicBody = createCard({
       title: t('AI Editor'),
-      desc: t('Enable AI editor features such as inline completion and selection rewrite.'),
+      desc: t('Enable AI features for rewrite, completion, and generation.'),
       toggle: {
         value: this.plugin.settings.ai.enabled,
         onChange: async (value) => {
@@ -1816,73 +1756,111 @@ export class editingToolbarSettingTab extends PluginSettingTab {
     });
 
     if (aiEnabled) {
-      const accountBody = createCard({
-        title: t('PKMer AI'),
-        desc: t('Log in to PKMer AI to get free AI features without manual model setup.'),
-        badge: this.plugin.settings.ai.pkmer.userInfo ? t('Logged in') : t('Not logged in'),
+      const customModelBody = createCard({
+        title: t('Custom AI Model'),
+        desc: t('Configure an OpenAI-compatible API endpoint. Supports OpenAI, OpenRouter, Ollama, and any OpenAI-compatible service.'),
+        badge: this.plugin.settings.ai.enableCustomModel ? t('Enabled') : t('Disabled'),
       });
 
-      const pkmerAccountDesc = document.createDocumentFragment();
-      pkmerAccountDesc.append(this.plugin.aiManager.getPKMerStatusText());
-      if (this.plugin.settings.ai.pkmer.userInfo?.ai_quota?.quota !== undefined) {
-        pkmerAccountDesc.append(' ');
-        const quotaLink = document.createElement('a');
-        quotaLink.textContent = t('More Quota');
-        quotaLink.href = getPKMerAIQuotaUrl();
-        quotaLink.target = '_blank';
-        quotaLink.rel = 'noopener noreferrer';
-        pkmerAccountDesc.appendChild(quotaLink);
-      }
-
-      new Setting(accountBody)
-        .setDesc(pkmerAccountDesc)
-        .addButton((button) => {
-          if (this.plugin.settings.ai.pkmer.userInfo) {
-            button.setButtonText(t('Logout')).onClick(async () => {
-              await this.plugin.aiManager.logoutFromPKMer();
-              this.display();
-            });
-            return;
-          }
-
-          button.setButtonText(t('Login')).setCta().onClick(async () => {
-            await this.plugin.aiManager.loginWithPKMer();
-            this.display();
-          });
-        })
-        .addButton((button) => {
-          if (!this.plugin.settings.ai.pkmer.userInfo) {
-            button.buttonEl.style.display = 'none';
-            return;
-          }
-
-          button.setButtonText(t('Check Quota')).onClick(async () => {
-            await this.plugin.aiManager.refreshPKMerQuota();
+      new Setting(customModelBody)
+        .setName(t('Enable Custom Model'))
+        .setDesc(t('Use a custom OpenAI-compatible API endpoint.'))
+        .addToggle((toggle) => {
+          toggle.setValue(this.plugin.settings.ai.enableCustomModel);
+          toggle.onChange(async (value) => {
+            this.plugin.settings.ai.enableCustomModel = value;
+            await this.plugin.saveSettings();
             this.display();
           });
         });
 
-       
+      if (this.plugin.settings.ai.enableCustomModel) {
+        new Setting(customModelBody)
+          .setName(t('API Format'))
+          .setDesc(t('Choose the API format.'))
+          .addDropdown((dropdown) => {
+            dropdown.addOption('openai-compatible', 'OpenAI Compatible');
+            dropdown.addOption('ollama', 'Ollama');
+            dropdown.setValue(this.plugin.settings.ai.customModel.apiFormat);
+            dropdown.onChange(async (value) => {
+              this.plugin.settings.ai.customModel.apiFormat = value as CustomModelApiFormat;
+              await this.plugin.saveSettings();
+            });
+          });
 
-      if (!this.plugin.settings.ai.pkmer.userInfo) {
-        const accountLinkNote = accountBody.createDiv({ cls: 'editing-toolbar-ai-note' });
-        accountLinkNote.appendText(`${t('Need a PKMer AI account?')} `);
-        const accountLink = accountLinkNote.createEl('a', { text: t('Open PKMer AI') });
-        accountLink.href = getPKMerAIEntryUrl();
-        accountLink.target = '_blank';
-        accountLink.rel = 'noopener noreferrer';
+        new Setting(customModelBody)
+          .setName(t('Base URL'))
+          .setDesc(t('API endpoint URL (e.g. https://api.openai.com/v1 or http://localhost:11434)'))
+          .addText((text) => {
+            text.setPlaceholder('https://api.openai.com/v1');
+            text.setValue(this.plugin.settings.ai.customModel.baseUrl);
+            text.onChange(async (value) => {
+              this.plugin.settings.ai.customModel.baseUrl = value;
+              await this.plugin.saveSettings();
+            });
+            text.inputEl.style.width = '100%';
+          });
+
+        new Setting(customModelBody)
+          .setName(t('Model'))
+          .setDesc(t('Model name (e.g. gpt-4o, claude-sonnet-4-20250514, llama3.2)'))
+          .addText((text) => {
+            text.setPlaceholder('gpt-4o');
+            text.setValue(this.plugin.settings.ai.customModel.model);
+            text.onChange(async (value) => {
+              this.plugin.settings.ai.customModel.model = value;
+              await this.plugin.saveSettings();
+            });
+            text.inputEl.style.width = '100%';
+          });
+
+        new Setting(customModelBody)
+          .setName(t('API Key'))
+          .setDesc(t('Your API key. Stored locally in plugin settings.'))
+          .addText((text) => {
+            text.setPlaceholder('sk-...');
+            text.setValue(this.plugin.settings.ai.customModel.apiKey);
+            text.onChange(async (value) => {
+              this.plugin.settings.ai.customModel.apiKey = value;
+              await this.plugin.saveSettings();
+            });
+            text.inputEl.type = 'password';
+            text.inputEl.style.width = '100%';
+          });
+
+        new Setting(customModelBody)
+          .setName(t('Temperature'))
+          .setDesc(t('Controls randomness (0.0 - 2.0). Lower = more deterministic.'))
+          .addSlider((slider) => {
+            slider.setLimits(0, 20, 1);
+            slider.setValue(Math.round(this.plugin.settings.ai.customModel.temperature * 10));
+            slider.setDynamicTooltip();
+            slider.onChange(async (value) => {
+              this.plugin.settings.ai.customModel.temperature = value / 10;
+              await this.plugin.saveSettings();
+            });
+          });
+
+        new Setting(customModelBody)
+          .addButton((button) => {
+            button.setButtonText(t('Test Connection')).onClick(async () => {
+              button.setDisabled(true);
+              button.setButtonText(t('Testing...'));
+              try {
+                await this.plugin.aiManager.aiService.testCustomProviderConnection();
+                new Notice(t('Connection successful!'));
+              } catch (error) {
+                new Notice(t('Connection failed: ') + (error?.message ?? String(error)));
+              }
+              button.setDisabled(false);
+              button.setButtonText(t('Test Connection'));
+            });
+          });
       }
 
-      const routeNote = accountBody.createDiv({
-        cls: 'editing-toolbar-ai-note',
-        text: t('Checking current AI route...'),
-      });
-      void this.plugin.aiManager.getProviderRouteStatusText().then((text) => {
-        routeNote.setText(text);
-      });
       const featuresBody = createCard({
         title: t('Editor Features'),
-        desc: t('Configure inline completion and rewrite after your AI provider is ready.'),
+        desc: t('Configure rewrite and inline completion options.'),
         toggle: {
           value: this.plugin.settings.ai.enableInlineCompletion,
           onChange: async (value) => {
@@ -1893,296 +1871,59 @@ export class editingToolbarSettingTab extends PluginSettingTab {
         },
       });
 
-      if (inlineCompletionEnabled) {
+      if (this.plugin.settings.ai.enableInlineCompletion) {
         new Setting(featuresBody)
-          .setName(t('Completion Mode'))
-          .setDesc(t('Choose whether completion is triggered manually or automatically after a short pause.'))
+          .setName(t('Completion Trigger'))
+          .setDesc(t('Manual (Ctrl+J) or automatic after a delay.'))
           .addDropdown((dropdown) => {
-            dropdown
-              .addOption('manual', t('Manual'))
-              .addOption('auto', t('Auto'))
-              .setValue(this.plugin.settings.ai.completionTrigger)
-              .onChange(async (value) => {
-                this.plugin.settings.ai.completionTrigger = value as 'manual' | 'auto';
-                await this.plugin.saveSettings();
-                this.display();
-              });
+            dropdown.addOption('manual', t('Manual'));
+            dropdown.addOption('auto', t('Auto'));
+            dropdown.setValue(this.plugin.settings.ai.completionTrigger);
+            dropdown.onChange(async (value) => {
+              this.plugin.settings.ai.completionTrigger = value as 'manual' | 'auto';
+              await this.plugin.saveSettings();
+            });
           });
 
-        if (this.plugin.settings.ai.completionTrigger === 'manual') {
+        if (this.plugin.settings.ai.completionTrigger === 'auto') {
           new Setting(featuresBody)
-            .setName(t('Manual Completion Shortcut'))
-            .setDesc(t('Default shortcut is Ctrl+J. You can customize it in Obsidian Hotkeys.'))
-            .addButton((button) => {
-              button.setButtonText(t('Open Hotkey Settings')).onClick(() => {
-                this.app.setting.open();
-                this.app.setting.openTabById('hotkeys');
-              });
-            });
-        }
-
-        if (autoCompletionEnabled) {
-          new Setting(featuresBody)
-            .setName(t('Completion Delay (ms)'))
-            .setDesc(t('Delay before auto-triggering inline completion.'))
-            .addText((text) => {
-              text.setValue(String(this.plugin.settings.ai.completionDelay)).onChange(async (value) => {
-                const parsed = Number.parseInt(value, 10);
-                if (!Number.isNaN(parsed) && parsed >= 0) {
-                  this.plugin.settings.ai.completionDelay = parsed;
-                  await this.plugin.saveSettings();
-                }
+            .setName(t('Auto-Complete Delay'))
+            .setDesc(t('Delay in milliseconds before automatic completion triggers.'))
+            .addSlider((slider) => {
+              slider.setLimits(100, 3000, 100);
+              slider.setValue(this.plugin.settings.ai.completionDelay);
+              slider.setDynamicTooltip();
+              slider.onChange(async (value) => {
+                this.plugin.settings.ai.completionDelay = value;
+                await this.plugin.saveSettings();
               });
             });
         }
       }
 
-
-
-
-      const pkmerModelBody = createCard({
-        title: t('PKMer Model'),
-        desc: t('Choose models by task.'),
-        headerDropdown: {
-          options: [
-            { value: 'smart', label: t('Default') },
-            { value: 'manual', label: t('Manual') },
-          ],
-          value: pkmerModelRoutingMode,
-          onChange: async (value) => {
-            this.plugin.settings.ai.pkmerModelRouting.mode = value as 'smart' | 'manual';
+      new Setting(featuresBody)
+        .setName(t('Rewrite'))
+        .setDesc(t('Enable AI rewrite actions on selected text.'))
+        .addToggle((toggle) => {
+          toggle.setValue(this.plugin.settings.ai.enableRewrite);
+          toggle.onChange(async (value) => {
+            this.plugin.settings.ai.enableRewrite = value;
             await this.plugin.saveSettings();
             this.display();
-          },
-        },
-        collapsible: true,
-        open: pkmerModelRoutingMode === 'manual',
-      });
-
-      if (pkmerModelRoutingMode === 'smart') {
-        const smartSummary = pkmerModelBody.createDiv({ cls: 'editing-toolbar-ai-note' });
-        smartSummary.createDiv({ text: `${t('Completion')}: ${getPkmerModelLabel(resolvePKMerModelForScene(this.plugin.settings.ai, 'completion'))}` });
-        smartSummary.createDiv({ text: `${t('Rewrite')}: ${getPkmerModelLabel(resolvePKMerModelForScene(this.plugin.settings.ai, 'rewrite'))}` });
-        smartSummary.createDiv({ text: `${t('Reasoning')}: ${getPkmerModelLabel(resolvePKMerModelForScene(this.plugin.settings.ai, 'reasoning'))}` });
-        smartSummary.createDiv({ text: `${t('Structured')}: ${getPkmerModelLabel(resolvePKMerModelForScene(this.plugin.settings.ai, 'artifact'))}` });
-      } else {
-        new Setting(pkmerModelBody)
-          .setName(t('Completion'))
-          .setDesc(t('Used for inline completion.'))
-          .addDropdown((dropdown) => {
-            addPkmerModelOptions(dropdown)
-              .setValue(this.plugin.settings.ai.pkmerModelRouting.completion)
-              .onChange(async (value: string) => {
-                this.plugin.settings.ai.pkmerModelRouting.completion = value;
-                await this.plugin.saveSettings();
-              });
           });
+        });
 
-        new Setting(pkmerModelBody)
-          .setName(t('Rewrite'))
-          .setDesc(t('Used for normal rewrite.'))
-          .addDropdown((dropdown) => {
-            addPkmerModelOptions(dropdown)
-              .setValue(this.plugin.settings.ai.pkmerModelRouting.rewrite)
-              .onChange(async (value: string) => {
-                this.plugin.settings.ai.pkmerModelRouting.rewrite = value;
-                await this.plugin.saveSettings();
-              });
-          });
-
-        new Setting(pkmerModelBody)
-          .setName(t('Reasoning'))
-          .setDesc(t('Used for explain, summarize, and custom prompts.'))
-          .addDropdown((dropdown) => {
-            addPkmerModelOptions(dropdown)
-              .setValue(this.plugin.settings.ai.pkmerModelRouting.reasoning)
-              .onChange(async (value: string) => {
-                this.plugin.settings.ai.pkmerModelRouting.reasoning = value;
-                await this.plugin.saveSettings();
-              });
-          });
-
-        new Setting(pkmerModelBody)
-          .setName(t('Structured'))
-          .setDesc(t('Used for frontmatter and canvas.'))
-          .addDropdown((dropdown) => {
-            addPkmerModelOptions(dropdown)
-              .setValue(this.plugin.settings.ai.pkmerModelRouting.artifact)
-              .onChange(async (value: string) => {
-                this.plugin.settings.ai.pkmerModelRouting.artifact = value;
-                await this.plugin.saveSettings();
-              });
-          });
-      }
-
-      pkmerModelBody.createDiv({
-        cls: 'editing-toolbar-ai-note',
-        text: t('PKMer route only.'),
-      });
-      const customBody = createCard({
-        title: t('Custom Model (Optional)'),
-        desc: t('Custom model is used automatically when PKMer AI is unavailable.'),
-        toggle: {
-          value: this.plugin.settings.ai.enableCustomModel,
-          onChange: async (value) => {
-            this.plugin.settings.ai.enableCustomModel = value;
-            await this.plugin.saveSettings();
-            this.display();
-          },
-        },
-      });
-
-      if (customModelEnabled) {
-        const customApiFormat = (this.plugin.settings.ai.customModel.apiFormat ?? 'openai-compatible') as CustomModelApiFormat;
-        const isOllamaFormat = customApiFormat === 'ollama';
-        const customModelBaseUrl = this.plugin.settings.ai.customModel.baseUrl.trim();
-        const cachedOllamaModels = isOllamaFormat && this.cachedCustomOllamaModelsBaseUrl === customModelBaseUrl
-          ? this.cachedCustomOllamaModels
-          : [];
-        const cachedOllamaModelsError = isOllamaFormat && this.cachedCustomOllamaModelsBaseUrl === customModelBaseUrl
-          ? this.cachedCustomOllamaModelsError
-          : '';
-        const secureStorageDesc = this.plugin.aiManager.hasSecureStorage()
-          ? (this.plugin.aiManager.hasCustomModelApiKey()
-            ? t('Stored securely in Obsidian secret storage.')
-            : t('Will be stored securely in Obsidian secret storage.'))
-          : t('Current Obsidian version does not support secure secret storage.');
-        const apiKeyDesc = isOllamaFormat
-          ? `${t('Optional for Ollama. Leave empty unless your gateway requires authentication.')} ${secureStorageDesc}`.trim()
-          : secureStorageDesc;
-
-        new Setting(customBody)
-          .setName(t('Custom API Format'))
-          .setDesc(t('Choose whether the custom model uses an OpenAI-compatible endpoint or the native Ollama API.'))
-          .addDropdown((dropdown) => {
-            dropdown
-              .addOption('openai-compatible', t('OpenAI-compatible'))
-              .addOption('ollama', t('Ollama'))
-              .setValue(customApiFormat)
-              .onChange(async (value) => {
-                this.plugin.settings.ai.customModel.apiFormat = value as CustomModelApiFormat;
-                await this.plugin.saveSettings();
-                this.display();
-              });
-          });
-
-        new Setting(customBody)
-          .setName(t('Custom API Base URL'))
-          .setDesc(isOllamaFormat
-            ? t('Native Ollama endpoint. The root URL, /api, /api/chat, or /api/generate are all supported.')
-            : t('OpenAI-compatible endpoint for your own provider.'))
-          .addText((text) => {
-            text.setPlaceholder(isOllamaFormat ? 'http://127.0.0.1:11434' : 'https://api.openai.com').setValue(this.plugin.settings.ai.customModel.baseUrl).onChange(async (value) => {
-              this.plugin.settings.ai.customModel.baseUrl = value.trim();
+      if (this.plugin.settings.ai.enableRewrite) {
+        new Setting(featuresBody)
+          .setName(t('Min Selection Length'))
+          .setDesc(t('Minimum number of characters required to trigger rewrite.'))
+          .addSlider((slider) => {
+            slider.setLimits(1, 100, 1);
+            slider.setValue(this.plugin.settings.ai.rewriteMinSelectionLength);
+            slider.setDynamicTooltip();
+            slider.onChange(async (value) => {
+              this.plugin.settings.ai.rewriteMinSelectionLength = value;
               await this.plugin.saveSettings();
-            });
-          });
-
-        new Setting(customBody)
-          .setName(t('Custom Model Name'))
-          .setDesc(t('Model identifier used for inline completion and rewrite requests.'))
-          .addText((text) => {
-            text.setPlaceholder(isOllamaFormat ? 'qwen2.5:7b' : 'gpt-4o-mini').setValue(this.plugin.settings.ai.customModel.model).onChange(async (value) => {
-              this.plugin.settings.ai.customModel.model = value.trim();
-              await this.plugin.saveSettings();
-            });
-          });
-
-        if (isOllamaFormat) {
-          const detectedModelsDesc = cachedOllamaModelsError
-            ? `${t('Choose a detected Ollama model to fill the model field.')} ${cachedOllamaModelsError}`.trim()
-            : t('Choose a detected Ollama model to fill the model field.');
-
-          new Setting(customBody)
-            .setName(t('Detected Ollama Models'))
-            .setDesc(cachedOllamaModels.length > 0 ? detectedModelsDesc : t('Fetch available models from your Ollama service.'))
-            .addDropdown((dropdown) => {
-              dropdown.addOption('', t('Select a detected model'));
-
-              cachedOllamaModels.forEach((modelName) => {
-                dropdown.addOption(modelName, modelName);
-              });
-
-              const currentModel = this.plugin.settings.ai.customModel.model.trim();
-              if (currentModel && !cachedOllamaModels.includes(currentModel)) {
-                dropdown.addOption(currentModel, currentModel);
-              }
-
-              dropdown.setValue(cachedOllamaModels.includes(currentModel) ? currentModel : '');
-              dropdown.onChange(async (value) => {
-                if (!value) {
-                  return;
-                }
-
-                this.plugin.settings.ai.customModel.model = value;
-                await this.plugin.saveSettings();
-                this.display();
-              });
-            })
-            .addButton((button) => {
-              button.setButtonText(t('Refresh')).onClick(async () => {
-                button.setDisabled(true);
-                button.setButtonText(t('Loading...'));
-                await this.refreshCustomOllamaModels();
-              });
-            });
-        }
-
-        new Setting(customBody)
-          .setName(t('Custom API Key'))
-          .setDesc(apiKeyDesc)
-          .addText((text) => {
-            text.inputEl.type = 'password';
-            text.setPlaceholder(this.plugin.aiManager.hasCustomModelApiKey()
-              ? t('Stored securely')
-              : (isOllamaFormat ? t('Optional') : t('Enter API key')));
-            text.setValue('').onChange(async (value) => {
-              if (value.trim()) {
-                this.plugin.aiManager.saveCustomModelApiKey(value);
-              } else {
-                this.plugin.aiManager.clearCustomModelApiKey();
-              }
-              await this.plugin.saveSettings();
-            });
-          })
-          .addButton((button) => {
-            button.setButtonText(t('Clear')).onClick(async () => {
-              this.plugin.aiManager.clearCustomModelApiKey();
-              await this.plugin.saveSettings();
-              this.display();
-            });
-          });
-
-        new Setting(customBody)
-          .setName(t('Test Connection'))
-          .setDesc(t('Send a lightweight request to verify your custom model settings.'))
-          .addButton((button) => {
-            button.setButtonText(t('Test Connection')).onClick(async () => {
-              button.setDisabled(true);
-              button.setButtonText(t('Testing...'));
-              try {
-                await this.plugin.aiManager.testCustomModelConnection();
-              } finally {
-                button.setDisabled(false);
-                button.setButtonText(t('Test Connection'));
-              }
-            });
-          });
-
-        const moreOptions = customBody.createEl('details', { cls: 'editing-toolbar-ai-inline-disclosure' });
-        moreOptions.createEl('summary', { cls: 'editing-toolbar-ai-inline-summary', text: t('More Options') });
-        const moreOptionsBody = moreOptions.createDiv('editing-toolbar-ai-inline-body');
-
-        new Setting(moreOptionsBody)
-          .setName(t('Temperature'))
-          .setDesc(t('Lower values are more stable; higher values are more creative.'))
-          .addText((text) => {
-            text.setValue(String(this.plugin.settings.ai.customModel.temperature)).onChange(async (value) => {
-              const parsed = Number.parseFloat(value);
-              if (!Number.isNaN(parsed) && parsed >= 0) {
-                this.plugin.settings.ai.customModel.temperature = parsed;
-                await this.plugin.saveSettings();
-              }
             });
           });
       }

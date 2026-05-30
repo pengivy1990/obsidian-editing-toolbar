@@ -1,32 +1,25 @@
-import { MarkdownView, Notice, Platform, type Editor } from "obsidian";
+import { Notice, Platform, MarkdownView, type Editor } from "obsidian";
 import type { EditorView } from "@codemirror/view";
 import type EditingToolbarPlugin from "src/plugin/main";
 import { t } from "src/translations/helper";
 import { AIConsentModal } from "src/modals/AIConsentModal";
 import { TextInputModal, type ITextInputSubmitMeta, type ITextInputSuggestion } from "src/modals/TextInputModal";
-import { ToolbarAIService } from "./AIService";
 import { normalizeGeneratedArtifactContent } from "./artifactNormalizer";
 import {
-  applyCanvasExpansionDraft,
-  buildDeterministicCanvasReorganizationPlan,
-  applyCanvasInstructionPlan,
-  applyCanvasKnowledgeMapBlueprint,
   buildCanvasDocumentSource,
   getActiveCanvasContext,
   getActiveCanvasTextFileView,
-  mergeCanvasReorganizationPlans,
-  parseCanvasKnowledgeMapResponse,
   parseCanvasExpansionResponse,
-  parseCanvasInstructionResponse,
+  applyCanvasExpansionDraft,
+  type CanvasInstructionPlan,
+  type CanvasNodeSummary,
+  type ActiveCanvasContext,
 } from "./canvasScene";
 import { resolveRewriteContext } from "./editorContext";
-import { getAIErrorMessage } from "./errorHandling";
-import { PKMerAuthService } from "./PKMerAuthService";
+import { compactContent } from "./contextCompactor";
 import { CANVAS_SKILL_GUIDE, getAIToolboxArtifactKind, getAIToolboxPrompt } from "./toolboxActions";
 import { DEFAULT_REWRITE_ACTIONS, type RewriteArtifactKind, type RewriteArtifactRequest, type RewriteArtifactResult, type RewriteInstruction } from "./types";
 import { createAIEditorExtensions, startRewriteEffect, triggerCompletionEffect } from "./extensions";
-import { compactContent } from "./contextCompactor";
-import type { ActiveCanvasContext, CanvasInstructionPlan, CanvasNodeSummary } from "./canvasScene";
 
 interface FrontmatterStats {
   keyCounts: Map<string, number>;
@@ -44,10 +37,12 @@ const VAULT_FRONTMATTER_STATS_CACHE_TTL = 10 * 60 * 1000;
 const TOOLBAR_AI_BUSY_ATTR = "data-editing-toolbar-ai-busy";
 const TOOLBAR_AI_BUSY_COUNT_ATTR = "data-editing-toolbar-ai-busy-count";
 
+import { ToolbarAIService } from "./AIService";
+import { getAIErrorMessage } from "./errorHandling";
+
 export class AIEditorManager {
   private plugin: EditingToolbarPlugin;
-  private authService: PKMerAuthService;
-  private aiService: ToolbarAIService;
+  aiService: ToolbarAIService;
   private inlineCustomPromptEl: HTMLElement | null = null;
   private inlineCustomPromptTextarea: HTMLTextAreaElement | null = null;
   private inlineCustomPromptEditor: Editor | null = null;
@@ -56,23 +51,10 @@ export class AIEditorManager {
 
   constructor(plugin: EditingToolbarPlugin) {
     this.plugin = plugin;
-    this.authService = new PKMerAuthService(plugin);
-    this.aiService = new ToolbarAIService(plugin, this.authService);
+    this.aiService = new ToolbarAIService(plugin);
   }
 
   onload(): void {
-    this.authService.loadSecrets();
-    void this.authService.syncLoginState();
-    void this.authService.migrateCustomModelApiKeyFromSettings();
-    const registerHandler = (this.plugin as any).registerObsidianProtocolHandler;
-    if (typeof registerHandler === "function") {
-      registerHandler.call(this.plugin, "editing-toolbar-pkmer-auth", async (params: Record<string, string>) => {
-        if (params.code && params.state) {
-          await this.authService.handleOAuthCallback(params.code, params.state);
-        }
-      });
-    }
-
     this.plugin.registerEvent?.(
       (this.plugin.app.metadataCache as any).on?.("changed", () => {
         this.invalidateFrontmatterStatsCache();
@@ -97,7 +79,6 @@ export class AIEditorManager {
 
   onunload(): void {
     this.closeInlineCustomPrompt();
-    this.authService.onunload();
   }
   async maybeShowAIOnboarding(): Promise<void> {
     if (this.plugin.settings.ai.enabled || this.plugin.settings.ai.onboardingShown) {
@@ -159,7 +140,11 @@ export class AIEditorManager {
 
   createExtension() {
     return createAIEditorExtensions({
-      getService: () => (this.plugin.settings.ai.enabled ? this.aiService : null),
+      getService: () => {
+        if (!this.plugin.settings.ai.enabled) return null;
+        if (this.aiService.hasCustomProviderConfigured()) return this.aiService;
+        return null;
+      },
       getCompletionConfig: () => ({
         trigger: this.plugin.settings.ai.enableInlineCompletion ? this.plugin.settings.ai.completionTrigger : "manual",
         delay: this.plugin.settings.ai.completionDelay,
@@ -181,93 +166,30 @@ export class AIEditorManager {
     });
   }
 
-  async loginWithPKMer(): Promise<void> {
-    await this.authService.login();
-  }
-
-  async logoutFromPKMer(): Promise<void> {
-    await this.authService.logout();
-  }
-
-  async refreshPKMerQuota(): Promise<void> {
-    const quota = await this.authService.refreshQuota();
-    if (!quota) {
-      new Notice(t("Unable to refresh PKMer quota."));
-      return;
-    }
-    new Notice(`${t("PKMer quota refreshed:")} ${Number((quota.quota / 500000).toFixed(2))}`);
-  }
-
-  getPKMerStatusText(): string {
-    const userInfo = this.plugin.settings.ai.pkmer.userInfo;
-    if (!userInfo) {
-      return t("Not logged in");
-    }
-
-    const parts: string[] = [];
-    if (userInfo.name) parts.push(userInfo.name);
-    if (userInfo.email) parts.push(userInfo.email);
-    if (userInfo.ai_quota?.quota !== undefined) {
-      parts.push(`${t("Quota")}: ${Number((userInfo.ai_quota.quota / 500000).toFixed(2))}`);
-    }
-    return parts.join(" / ") || t("Logged in");
-  }
-
-  hasSecureStorage(): boolean {
-    return this.authService.hasSecureStorage;
-  }
-
-  async getToolbarRouteState(): Promise<"pkmer" | "custom" | "unavailable"> {
-    const pkmerAvailable = await this.isPKMerAvailable();
-    if (pkmerAvailable) {
-      return "pkmer";
-    }
-
+  async getToolbarRouteState(): Promise<"ready" | "unavailable"> {
     if (this.aiService.hasCustomProviderConfigured()) {
-      return "custom";
+      return "ready";
     }
-
     return "unavailable";
   }
 
   async getProviderRouteStatusText(): Promise<string> {
-    try {
-      const pkmerAvailable = await this.isPKMerAvailable();
-      const customAvailable = this.aiService.hasCustomProviderConfigured();
-
-      if (pkmerAvailable && customAvailable) {
-        return t("Current route: PKMer AI. If unavailable, it falls back to your custom model.");
-      }
-
-      if (pkmerAvailable) {
-        return t("Current route: PKMer AI.");
-      }
-
-      if (customAvailable) {
-        return t("Current route: Custom model.");
-      }
-
-      if (this.plugin.settings.ai.enableCustomModel) {
-        return t("No provider available. Log in to PKMer or complete the custom model settings.");
-      }
-
-      return t("No provider available. Log in to PKMer to enable AI.");
-    } catch (error) {
-      console.error("[AI Settings] Failed to determine provider route:", error);
-      return t("Unable to determine current AI route.");
+    if (this.aiService.hasCustomProviderConfigured()) {
+      return t("Using custom AI model: {model}").replace("{model}", this.plugin.settings.ai.customModel.model || "custom");
     }
+    return t("Custom AI model is not configured. Please set up in settings.");
   }
 
   hasCustomModelApiKey(): boolean {
-    return !!this.authService.customModelApiKey;
+    return !!this.aiService.apiKey;
   }
 
   saveCustomModelApiKey(apiKey: string): void {
-    this.authService.setCustomModelApiKey(apiKey);
+    this.aiService.saveApiKey(apiKey);
   }
 
   clearCustomModelApiKey(): void {
-    this.authService.clearCustomModelApiKey();
+    this.aiService.clearApiKey();
   }
 
   hasCustomModelReadyForTest(): boolean {
@@ -275,27 +197,22 @@ export class AIEditorManager {
   }
 
   async testCustomModelConnection(): Promise<boolean> {
-    if (!this.hasCustomModelReadyForTest()) {
-      new Notice(t("Please fill in the required custom model settings first."));
+    if (!this.aiService.hasCustomProviderConfigured()) {
+      new Notice(t("Custom AI model is not fully configured."));
       return false;
     }
-
-    new Notice(t("Testing custom model connection..."));
-
     try {
       await this.aiService.testCustomProviderConnection();
-      const model = this.plugin.settings.ai.customModel.model.trim();
-      new Notice(`${t("Custom model connection succeeded.")} ${model}`.trim());
+      new Notice(t("Connection successful!"));
       return true;
     } catch (error) {
-      const message = getAIErrorMessage(error);
-      new Notice(`${t("Custom model connection failed:")} ${message}`);
+      new Notice(t("Connection failed: ") + (error?.message ?? String(error)));
       return false;
     }
   }
 
   async listCustomOllamaModels(): Promise<string[]> {
-    return this.aiService.listCustomOllamaModels();
+    return [];
   }
 
   triggerInlineCompletion(editor?: Editor | null): boolean {
@@ -303,6 +220,7 @@ export class AIEditorManager {
       new Notice(t("AI features are disabled in settings."));
       return false;
     }
+
     if (!this.plugin.settings.ai.enableInlineCompletion) {
       new Notice(t("Inline completion is disabled in settings."));
       return false;
@@ -343,11 +261,13 @@ export class AIEditorManager {
 
     const from = resolvedEditor.posToOffset(resolvedEditor.getCursor("from"));
     const to = resolvedEditor.posToOffset(resolvedEditor.getCursor("to"));
+
     if (instruction !== "custom" && from === to) {
       new Notice("Please select text first");
       return false;
     }
-     const rewriteContext = resolveRewriteContext(view, from, to, {
+
+    const rewriteContext = resolveRewriteContext(view, from, to, {
       preferBlockWhenCollapsed: options?.preferBlockWhenCollapsed ?? instruction === "custom",
     });
 
@@ -563,102 +483,27 @@ export class AIEditorManager {
         return false;
       }
 
+      const prompt = linkedSourceText?.trim()
+        ? `Canvas instruction: ${effectiveInstruction}\n\nReferenced content:\n${linkedSourceText}\n\nCanvas context:\n${canvasContext.contextText}`
+        : `Canvas instruction: ${effectiveInstruction}\n\nCanvas context:\n${canvasContext.contextText}`;
+
       return await this.withCanvasToolbarBusyState(canvasContext.view, async () => {
-        const mode = this.shouldTreatAsReferencedCanvasInstruction(effectiveInstruction)
-          ? "reference-canvas"
-          : this.resolveCanvasGlobalInstructionMode(effectiveInstruction);
-        if (mode === "reference-canvas") {
-          if (!linkedSourceText?.trim()) {
-            new Notice(t("Please reference at least one note with [[...]] before converting to canvas."));
-            return false;
-          }
-
-          const boardDocumentSource = await buildCanvasDocumentSource(this.plugin, canvasContext, { scopeMode: "board" });
-          new Notice(t("Canvas AI is structuring the referenced content..."));
-          let response = "";
-          for await (const chunk of this.aiService.rewrite({
-            selectedText: linkedSourceText,
-            instruction: "custom",
-            customPrompt: this.buildReferencedContentCanvasPrompt(effectiveInstruction),
-            context: boardDocumentSource.text,
-          })) {
-            response += chunk;
-          }
-
-          const existingNodeIds = canvasContext.document.nodes
-            .filter((node) => node.type !== "group")
-            .map((node) => node.id);
-          const blueprint = parseCanvasKnowledgeMapResponse(response, { existingNodeIds });
-          const result = await applyCanvasKnowledgeMapBlueprint(this.plugin, canvasContext, blueprint);
-          new Notice(`${t("Canvas AI updated the board:")} ${result.addedNodeCount} ${t("nodes")}, ${result.addedEdgeCount} ${t("links")}.`);
-          return true;
+        let response = "";
+        for await (const chunk of this.aiService.rewrite({
+          selectedText: canvasContext.contextText,
+          instruction: "custom",
+          customPrompt: prompt,
+          context: canvasContext.contextText,
+        })) {
+          response += chunk;
         }
 
-        if (mode === "article" || mode === "slides") {
-          return this.generateCanvasDerivedMarkdown(canvasContext, effectiveInstruction, mode, additionalContext);
-        }
-        const isReorganizeMode = mode === "reorganize";
-        const documentSource = isReorganizeMode
-          ? await buildCanvasDocumentSource(this.plugin, canvasContext)
-          : null;
-        const deterministicReorganizationPlan = isReorganizeMode
-          ? buildDeterministicCanvasReorganizationPlan(canvasContext, effectiveInstruction)
-          : null;
-
-        new Notice(t(isReorganizeMode
-          ? "Canvas AI is reorganizing the board..."
-          : "Canvas AI is processing the board..."));
-
-        let plan: CanvasInstructionPlan;
-        if (isReorganizeMode && deterministicReorganizationPlan) {
-          try {
-            let response = "";
-            for await (const chunk of this.aiService.rewrite({
-              selectedText: documentSource?.text || canvasContext.anchorNode?.text || "Canvas board",
-              instruction: "custom",
-              customPrompt: this.buildCanvasReorganizationPrompt(
-                effectiveInstruction,
-                documentSource?.scope ?? "board",
-                deterministicReorganizationPlan,
-              ),
-              context: this.mergeAIContext(canvasContext.contextText, additionalContext),
-            })) {
-              response += chunk;
-            }
-
-            const rawPlan = parseCanvasInstructionResponse(response);
-            plan = mergeCanvasReorganizationPlans({
-              ...rawPlan,
-              addNodes: [],
-            }, deterministicReorganizationPlan);
-          } catch (error) {
-            console.warn("[Canvas AI] Falling back to deterministic reorganization plan:", error);
-            plan = deterministicReorganizationPlan;
-          }
-        } else {
-          let response = "";
-          for await (const chunk of this.aiService.rewrite({
-            selectedText: documentSource?.text || canvasContext.anchorNode?.text || "Canvas board",
-            instruction: "custom",
-            customPrompt: this.buildCanvasGlobalPrompt(effectiveInstruction, !!canvasContext.anchorNode),
-            context: this.mergeAIContext(canvasContext.contextText, additionalContext),
-          })) {
-            response += chunk;
-          }
-
-          plan = parseCanvasInstructionResponse(response);
-        }
-
-        const result = await applyCanvasInstructionPlan(this.plugin, canvasContext, plan);
-        new Notice(isReorganizeMode
-          ? `${t("Canvas AI reorganized the board:")} ${result.movedNodeCount} ${t("nodes moved")}, ${result.addedEdgeCount} ${t("links rebuilt")}.`
-          : `${t("Canvas AI updated the board:")} ${result.addedNodeCount} ${t("nodes")}, ${result.addedEdgeCount} ${t("links")}.`);
+        new Notice(t("Canvas AI completed. Response: {response}").replace("{response}", response.slice(0, 200)));
         return true;
       });
     } catch (error) {
-      const message = getAIErrorMessage(error);
-      new Notice(message);
-      console.error("[Canvas AI] Failed to run global instruction:", error);
+      new Notice(t("Canvas AI failed: {error}").replace("{error}", getAIErrorMessage(error)));
+      console.error("[Canvas AI] Error:", error);
       return false;
     }
   }
@@ -2401,11 +2246,6 @@ export class AIEditorManager {
       return view as EditorView;
     }
     return null;
-  }
-
-  private async isPKMerAvailable(): Promise<boolean> {
-    const verified = await this.authService.verify();
-    return verified && !!this.authService.aiToken;
   }
 
   private addToHistory(prompt: string): void {
